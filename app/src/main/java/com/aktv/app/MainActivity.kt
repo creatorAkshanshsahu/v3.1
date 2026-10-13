@@ -678,8 +678,6 @@ class MainActivity : AppCompatActivity() {
                 )
                 BrowserActivity.runtime = runtime
             }
-            // Allow the embed page to start video on its own (no remote-click needed on a TV).
-            try { runtime.settings.setAutoplayDefault(0) } catch (_: Throwable) { }
             val view = GeckoView(this)
             // TextureView composes correctly under AKTV's black layer, fades and overlays;
             // the default SurfaceView sits behind the window and shows as a black screen.
