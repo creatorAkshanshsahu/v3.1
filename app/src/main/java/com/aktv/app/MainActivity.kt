@@ -733,7 +733,8 @@ class MainActivity : AppCompatActivity() {
         ui.postDelayed(embedWatchdog, 45000)
     }
     private var embedWatchdogSession: GeckoSession? = null
-    private val embedWatchdog: Runnable = Runnable {
+    private val embedWatchdog = Runnable { embedWatchdogTick() }
+    private fun embedWatchdogTick() {
         val s = embedSession
         if (s != null && s === embedWatchdogSession && embedReloads < 3) {
             embedReloads++
