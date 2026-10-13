@@ -76,10 +76,7 @@ class BrowserActivity : Activity() {
         /** One shared Firefox engine: autoplay allowed, ads blocked, TG player fix extension installed. */
         fun runtime(ctx: Context): GeckoRuntime {
             runtime?.let { return it }
-            val settings = GeckoRuntimeSettings.Builder()
-                .autoplayDefault(GeckoRuntimeSettings.AUTOPLAY_DEFAULT_ALLOWED)
-                .build()
-            val rt = GeckoRuntime.create(ctx.applicationContext, settings)
+            val rt = GeckoRuntime.create(ctx.applicationContext)
             rt.settings.contentBlocking.setAntiTracking(ContentBlocking.AntiTracking.AD or ContentBlocking.AntiTracking.ANALYTIC)
             runtime = rt
             if (!fixInstalled) {
