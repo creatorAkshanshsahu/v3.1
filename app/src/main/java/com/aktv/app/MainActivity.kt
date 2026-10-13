@@ -24,7 +24,10 @@ import androidx.core.content.res.ResourcesCompat
 import androidx.core.graphics.ColorUtils
 import androidx.media3.common.*
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.drm.*
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -582,6 +585,7 @@ class MainActivity : AppCompatActivity() {
     /** Fresh tokens + native player first, TG web player only if that fails. Works from native and web mode. */
     private fun reloadStream() {
         if (current < 0) return
+        if (embedSession != null) { reloadEmbed(); return }
         Toast.makeText(this, "Reloading stream…", Toast.LENGTH_SHORT).show()
         retries = 0; play(current)
     }
@@ -604,9 +608,11 @@ class MainActivity : AppCompatActivity() {
         val http = DefaultHttpDataSource.Factory().setUserAgent(agent)
             .setDefaultRequestProperties(hdrs).setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000).setReadTimeoutMs(15000)
-        val item = MediaItem.Builder().setUri(url).apply {
-            if (!s.hls) setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(8000).build())
-        }.build()
+        // Stay further behind live and never speed up: avoids the stutter/lag on slow TV boxes.
+        val item = MediaItem.Builder().setUri(url).setLiveConfiguration(
+            MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(if (s.hls) 12000 else 10000)
+                .setMinOffsetMs(6000).setMinPlaybackSpeed(1f).setMaxPlaybackSpeed(1f).build()
+        ).build()
         val src: MediaSource = if (s.hls) {
             HlsMediaSource.Factory(http).setAllowChunklessPreparation(true).createMediaSource(item)
         } else {
@@ -615,7 +621,15 @@ class MainActivity : AppCompatActivity() {
             if (d != null && d.has("keyId")) { val mgr = clearKey(d); f.setDrmSessionManagerProvider { mgr } }
             f.createMediaSource(item)
         }
-        val p = ExoPlayer.Builder(this).build()
+        val load = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(20000, 50000, 2500, 5000)
+            .setPrioritizeTimeOverSizeThresholds(true).build()
+        val selector = DefaultTrackSelector(this).apply {
+            setParameters(buildUponParameters().setMaxVideoSize(1280, 720).setExceedRendererCapabilitiesIfNecessary(false))
+        }
+        val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
+        val p = ExoPlayer.Builder(this, renderers).setLoadControl(load).setTrackSelector(selector).build()
         p.setMediaSource(src); p.playWhenReady = true
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
@@ -669,19 +683,12 @@ class MainActivity : AppCompatActivity() {
         aurora.pause()
         Toast.makeText(this, if (reason != null) "$reason – trying TG player" else "Opening TG player", Toast.LENGTH_LONG).show()
         try {
-            var runtime = BrowserActivity.runtime
-            if (runtime == null) {
-                runtime = GeckoRuntime.create(applicationContext)
-                runtime.settings.contentBlocking.setAntiTracking(
-                    org.mozilla.geckoview.ContentBlocking.AntiTracking.AD or
-                    org.mozilla.geckoview.ContentBlocking.AntiTracking.ANALYTIC
-                )
-                BrowserActivity.runtime = runtime
-            }
+            val runtime = BrowserActivity.runtime(this)
             val view = GeckoView(this)
             // TextureView composes correctly under AKTV's black layer, fades and overlays;
             // the default SurfaceView sits behind the window and shows as a black screen.
             view.setViewBackend(GeckoView.BACKEND_TEXTURE_VIEW)
+            view.setBackgroundColor(Color.BLACK)
             val session = GeckoSession(GeckoSessionSettings.Builder()
                 .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
                 .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_DESKTOP)
@@ -701,13 +708,16 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { Toast.makeText(this@MainActivity, "TG player crashed", Toast.LENGTH_LONG).show() }
                 }
             }
+            BrowserActivity.allowAutoplay(session)
             session.open(runtime)
             view.setSession(session)
             // Insert at the back so AKTV's native guide, info and remote overlays remain above the video.
             layer.addView(view, 0, FrameLayout.LayoutParams(-1, -1))
             embedView = view
             embedSession = session
+            embedReloads = 0
             session.loadUri(embedUrl(ch))
+            scheduleEmbedWatchdog(session)
         } catch (e: Exception) {
             spinner.visibility = View.GONE
             pv.visibility = View.VISIBLE
@@ -715,7 +725,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var embedReloads = 0
+    /** If the TG page is still not showing a picture after a while, reload it (TG then fetches a working server itself). */
+    private fun scheduleEmbedWatchdog(session: GeckoSession) {
+        ui.removeCallbacks(embedWatchdog)
+        embedWatchdogSession = session
+        ui.postDelayed(embedWatchdog, 45000)
+    }
+    private var embedWatchdogSession: GeckoSession? = null
+    private val embedWatchdog = Runnable {
+        val s = embedSession
+        if (s != null && s === embedWatchdogSession && embedReloads < 3) {
+            embedReloads++
+            Toast.makeText(this, "TG player slow – reloading ($embedReloads/3)", Toast.LENGTH_SHORT).show()
+            spinner.visibility = View.VISIBLE
+            s.reload()
+            ui.postDelayed(embedWatchdog, 45000)
+        }
+    }
+    private fun reloadEmbed() {
+        val s = embedSession ?: return
+        embedReloads = 0
+        Toast.makeText(this, "Reloading TG player…", Toast.LENGTH_SHORT).show()
+        spinner.visibility = View.VISIBLE
+        s.reload()
+        scheduleEmbedWatchdog(s)
+    }
+
     private fun stopInlineEmbed() {
+        ui.removeCallbacks(embedWatchdog)
         val session = embedSession
         embedSession = null
         try { session?.close() } catch (_: Exception) { }
@@ -760,7 +798,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop(); token++; ui.removeCallbacks(stall); stopInlineEmbed(); pv.visibility = View.VISIBLE; releasePlayer(); layer.visibility = View.GONE; aurora.pause()
         resetServers(); resetGuide()
-        if (searchShown) { searchShown = false; searchView.visibility = View.GONE; restoreHome() }
+        if (searchShown) { searchShown = false; searchView.visibility = View.GONE; home.visibility = View.VISIBLE; restoreHome() }
     }
 
     // ---------- home focus ownership ----------
@@ -892,7 +930,8 @@ class MainActivity : AppCompatActivity() {
         if (guideShown) closeGuide()
         closeServers()
         blockHome(); searchShown = true
-        if (layer.visibility != View.VISIBLE) kbAccent = Accent.SIGNAL
+        if (layer.visibility != View.VISIBLE) { kbAccent = Accent.SIGNAL; searchView.setBackgroundColor(0xFF060812.toInt()); home.visibility = View.INVISIBLE }
+        else searchView.setBackgroundColor(0xF4060812.toInt())
         searchQ.setLength(0)
         searchView.animate().cancel()
         searchView.visibility = View.VISIBLE; searchView.alpha = 0f
@@ -908,6 +947,7 @@ class MainActivity : AppCompatActivity() {
         searchView.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         currentFocus?.clearFocus()
         searchView.animate().cancel()
+        home.visibility = View.VISIBLE
         searchView.animate().alpha(0f).setDuration(180).withEndAction { if (!searchShown) searchView.visibility = View.GONE }.start()
         if (layer.visibility != View.VISIBLE) restoreHome()
     }

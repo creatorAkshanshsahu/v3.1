@@ -69,7 +69,40 @@ class ProgressLine(c: Context) : View(c) {
 
 /** Opens a website in a bundled Firefox engine (GeckoView), with a D-pad pointer. */
 class BrowserActivity : Activity() {
-    companion object { var runtime: GeckoRuntime? = null }
+    companion object {
+        var runtime: GeckoRuntime? = null
+        private var fixInstalled = false
+
+        /** One shared Firefox engine: autoplay allowed, ads blocked, TG player fix extension installed. */
+        fun runtime(ctx: Context): GeckoRuntime {
+            runtime?.let { return it }
+            val settings = GeckoRuntimeSettings.Builder()
+                .autoplayDefault(GeckoRuntimeSettings.AUTOPLAY_DEFAULT_ALLOWED)
+                .build()
+            val rt = GeckoRuntime.create(ctx.applicationContext, settings)
+            rt.settings.contentBlocking.setAntiTracking(ContentBlocking.AntiTracking.AD or ContentBlocking.AntiTracking.ANALYTIC)
+            runtime = rt
+            if (!fixInstalled) {
+                fixInstalled = true
+                try { rt.webExtensionController.ensureBuiltIn("resource://android/assets/tgfix/", "tgfix@aktv.app") } catch (_: Throwable) { }
+            }
+            return rt
+        }
+
+        /** Lets pages start video/audio on their own (a TV has no touch to tap Play). */
+        fun allowAutoplay(session: GeckoSession) {
+            session.permissionDelegate = object : GeckoSession.PermissionDelegate {
+                override fun onContentPermissionRequest(session: GeckoSession, perm: GeckoSession.PermissionDelegate.ContentPermission): GeckoResult<Int>? {
+                    return when (perm.permission) {
+                        GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE,
+                        GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE ->
+                            GeckoResult.fromValue(GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW)
+                        else -> null
+                    }
+                }
+            }
+        }
+    }
     private lateinit var geckoView: GeckoView
     private lateinit var cursor: CursorView
     private lateinit var session: GeckoSession
@@ -100,11 +133,7 @@ class BrowserActivity : Activity() {
             hint.animate().alpha(0f).setStartDelay(5000).setDuration(500).start()
         }.start()
 
-        if (runtime == null) {
-            runtime = GeckoRuntime.create(applicationContext)
-            // block ads & trackers (also cuts most pop-ups)
-            runtime!!.settings.contentBlocking.setAntiTracking(ContentBlocking.AntiTracking.AD or ContentBlocking.AntiTracking.ANALYTIC)
-        }
+        runtime(this)
         session = GeckoSession(GeckoSessionSettings.Builder()
             .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_DESKTOP).build())
@@ -120,6 +149,7 @@ class BrowserActivity : Activity() {
             override fun onProgressChange(session: GeckoSession, progress: Int) { bar.to(progress / 100f) }
             override fun onPageStop(session: GeckoSession, success: Boolean) { bar.finish() }
         }
+        allowAutoplay(session)
         session.open(runtime!!); geckoView.setSession(session)
         session.loadUri(intent.getStringExtra("url") ?: "https://livetgtv.lovable.app/")
         root.post { cursor.px = root.width / 2f; cursor.py = root.height / 2f; cursor.invalidate() }
